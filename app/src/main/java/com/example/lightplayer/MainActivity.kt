@@ -161,7 +161,6 @@ fun App(player: Player?) {
     var shuffle by remember { mutableStateOf(false) }
     var repeat by remember { mutableIntStateOf(Player.REPEAT_MODE_OFF) }
     var duration by remember { mutableLongStateOf(0L) }
-    var position by remember { mutableLongStateOf(0L) }
 
     DisposableEffect(player) {
         if (player == null) return@DisposableEffect onDispose { }
@@ -171,7 +170,6 @@ fun App(player: Player?) {
             shuffle = player.shuffleModeEnabled
             repeat = player.repeatMode
             duration = player.duration.coerceAtLeast(0L)
-            position = player.currentPosition
         }
         sync()
         val l = object : Player.Listener {
@@ -181,15 +179,14 @@ fun App(player: Player?) {
         onDispose { player.removeListener(l) }
     }
 
-    // Опитування позиції тільки поки екран видимий
-    val lifecycle = LocalLifecycleOwner.current.lifecycle
-    LaunchedEffect(player) {
-        if (player == null) return@LaunchedEffect
-        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
-            while (true) {
-                position = player.currentPosition
-                delay(if (player.isPlaying) 500 else 1000)
+    val playAt = remember(filtered, player) {
+        { index: Int ->
+            player?.run {
+                setMediaItems(filtered.map { it.toItem() }, index, 0L)
+                prepare()
+                play()
             }
+            Unit
         }
     }
 
@@ -198,7 +195,7 @@ fun App(player: Player?) {
     Scaffold(
         bottomBar = {
             if (player != null && current != null) {
-                PlayerPanel(player, current, isPlaying, shuffle, repeat, position, duration)
+                PlayerPanel(player, current, isPlaying, shuffle, repeat, duration)
             }
         }
     ) { pad ->
@@ -235,14 +232,8 @@ fun App(player: Player?) {
                     Text("У /Music нічого не знайдено")
                 }
                 else -> LazyColumn(Modifier.fillMaxSize()) {
-                    itemsIndexed(filtered, key = { _, t -> t.id }) { index, t ->
-                        TrackRow(t, t.id.toString() == currentId) {
-                            player?.run {
-                                setMediaItems(filtered.map { it.toItem() }, index, 0L)
-                                prepare()
-                                play()
-                            }
-                        }
+                    itemsIndexed(filtered, key = { _, t -> t.id }, contentType = { _, _ -> 0 }) { index, t ->
+                        TrackRow(t, index, t.id.toString() == currentId, playAt)
                     }
                 }
             }
@@ -255,7 +246,7 @@ fun Cover(track: Track?, px: Int, modifier: Modifier) {
     val ctx = LocalContext.current
     val bmp by produceState<Bitmap?>(Art.peek(track, px), track?.id) {
         value = if (track == null) null
-        else withContext(Dispatchers.IO) { Art.get(ctx, track, px) }
+        else withContext(Art.dispatcher) { Art.get(ctx, track, px) }
     }
     val b = bmp
     if (b != null) {
@@ -268,9 +259,9 @@ fun Cover(track: Track?, px: Int, modifier: Modifier) {
 }
 
 @Composable
-fun TrackRow(t: Track, selected: Boolean, onClick: () -> Unit) {
+fun TrackRow(t: Track, index: Int, selected: Boolean, onPlay: (Int) -> Unit) {
     Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 6.dp),
+        Modifier.fillMaxWidth().clickable { onPlay(index) }.padding(horizontal = 12.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Cover(t, 96, Modifier.size(48.dp).clip(RoundedCornerShape(6.dp)))
@@ -300,9 +291,18 @@ fun PlayerPanel(
     isPlaying: Boolean,
     shuffle: Boolean,
     repeat: Int,
-    position: Long,
     duration: Long,
 ) {
+    var position by remember { mutableLongStateOf(player.currentPosition) }
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    LaunchedEffect(player, track.id) {
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (true) {
+                position = player.currentPosition
+                delay(if (player.isPlaying) 500 else 1000)
+            }
+        }
+    }
     var dragging by remember { mutableStateOf<Float?>(null) }
     val max = duration.coerceAtLeast(1L).toFloat()
     val shown = (dragging ?: position.toFloat()).coerceIn(0f, max)

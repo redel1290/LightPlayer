@@ -7,9 +7,13 @@ import android.net.Uri
 import android.provider.MediaStore
 import android.util.LruCache
 import android.util.Size
+import androidx.compose.runtime.Immutable
 import androidx.media3.common.MediaItem
+import kotlinx.coroutines.asCoroutineDispatcher
+import java.util.concurrent.Executors
 import androidx.media3.common.MediaMetadata
 
+@Immutable
 data class Track(
     val id: Long,
     val title: String,
@@ -70,6 +74,9 @@ object Library {
 
 /** Крихітний кеш мініатюр з жорстким лімітом пам'яті (3 МБ). */
 object Art {
+    /** Лише 2 потоки на обкладинки, щоб не душити UI при скролі. */
+    val dispatcher = Executors.newFixedThreadPool(2).asCoroutineDispatcher()
+
     private val cache = object : LruCache<String, Bitmap>(3 * 1024 * 1024) {
         override fun sizeOf(key: String, value: Bitmap) = value.byteCount
     }
