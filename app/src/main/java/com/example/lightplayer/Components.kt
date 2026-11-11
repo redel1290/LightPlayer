@@ -2,33 +2,47 @@ package com.example.lightplayer
 
 import android.graphics.Bitmap
 import android.os.Build
-import androidx.compose.animation.Crossfade
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
@@ -51,6 +65,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
@@ -58,10 +73,14 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
@@ -76,6 +95,15 @@ fun fmt(ms: Long): String {
     return "%d:%02d".format(s / 60, s % 60)
 }
 
+fun onColor(c: Color): Color = if (c.luminance() > 0.55f) Color.Black else Color.White
+
+fun hueShift(c: Color, deg: Float): Color {
+    val hsv = FloatArray(3)
+    android.graphics.Color.colorToHSV(c.toArgb(), hsv)
+    hsv[0] = (hsv[0] + deg) % 360f
+    return Color(android.graphics.Color.HSVToColor(hsv))
+}
+
 // ---------------------------------------------------------------- допоміжне
 
 /** true лише поки додаток реально на екрані: ефекти в цей час малюються, у фоні вони вимкнені. */
@@ -86,13 +114,36 @@ fun rememberVisible(): Boolean {
     return st.isAtLeast(Lifecycle.State.RESUMED)
 }
 
-/** Значення масштабу пульсації; коли active = false, анімація не працює взагалі. */
+/** Пульсація: поки active, масштаб "дихає"; коли вимкнено, плавно повертається до 1. */
 @Composable
 fun rememberPulse(active: Boolean): State<Float> {
-    val idle = remember { mutableFloatStateOf(1f) }
-    if (!active) return idle
-    val t = rememberInfiniteTransition(label = "pulse")
-    return t.animateFloat(1f, 1.06f, infiniteRepeatable(tween(900), RepeatMode.Reverse), label = "pulse")
+    val p = remember { Animatable(1f) }
+    LaunchedEffect(active) {
+        if (active) {
+            while (true) {
+                p.animateTo(1.07f, tween(800))
+                p.animateTo(1f, tween(800))
+            }
+        } else {
+            p.animateTo(1f, tween(250))
+        }
+    }
+    return p.asState()
+}
+
+/** Повільний дрейф градієнта 0..1; при зупинці лишається на місці. */
+@Composable
+fun rememberDrift(active: Boolean): State<Float> {
+    val p = remember { Animatable(0.5f) }
+    LaunchedEffect(active) {
+        if (active) {
+            while (true) {
+                p.animateTo(1f, tween(7000, easing = LinearEasing))
+                p.animateTo(0f, tween(7000, easing = LinearEasing))
+            }
+        }
+    }
+    return p.asState()
 }
 
 // ---------------------------------------------------------------- обкладинка
@@ -108,8 +159,18 @@ fun Cover(track: Track?, px: Int, modifier: Modifier) {
     if (b != null) {
         Image(b.asImageBitmap(), null, modifier, contentScale = ContentScale.Crop)
     } else {
-        Box(modifier.background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
-            Text("♪", fontSize = 20.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Box(
+            modifier.background(
+                Brush.linearGradient(
+                    listOf(MaterialTheme.colorScheme.secondaryContainer, MaterialTheme.colorScheme.primaryContainer)
+                )
+            ),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                Ic.Note, null, Modifier.fillMaxSize(0.5f),
+                tint = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
+            )
         }
     }
 }
@@ -149,16 +210,16 @@ fun Heart(fav: Boolean, bounce: Boolean, onClick: () -> Unit) {
         if (fav != seen) {
             seen = fav
             if (bounce && fav) {
-                sc.snapTo(1.4f)
+                sc.snapTo(1.5f)
                 sc.animateTo(1f, spring(dampingRatio = 0.35f, stiffness = 400f))
             }
         }
     }
     IconButton(onClick = onClick) {
-        Text(
-            if (fav) "♥" else "♡",
-            fontSize = 22.sp,
-            color = if (fav) Color(0xFFE53935) else MaterialTheme.colorScheme.onSurfaceVariant,
+        Icon(
+            if (fav) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
+            contentDescription = null,
+            tint = if (fav) Color(0xFFFF4D6D) else MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.graphicsLayer {
                 scaleX = sc.value
                 scaleY = sc.value
@@ -187,14 +248,22 @@ fun FolderHeader(path: String, onUp: () -> Unit) {
 @Composable
 fun FolderRow(name: String, count: Int, onClick: () -> Unit) {
     Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 8.dp),
+        Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 2.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Box(
-            Modifier.size(48.dp).clip(RoundedCornerShape(6.dp))
-                .background(MaterialTheme.colorScheme.secondaryContainer),
+            Modifier.size(48.dp).clip(RoundedCornerShape(12.dp)).background(
+                Brush.linearGradient(
+                    listOf(MaterialTheme.colorScheme.primaryContainer, MaterialTheme.colorScheme.secondaryContainer)
+                )
+            ),
             contentAlignment = Alignment.Center
-        ) { Text("📁", fontSize = 24.sp) }
+        ) {
+            Icon(Ic.Folder, null, Modifier.size(26.dp), tint = MaterialTheme.colorScheme.primary)
+        }
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(name, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
@@ -203,7 +272,7 @@ fun FolderRow(name: String, count: Int, onClick: () -> Unit) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
-        Text("›", fontSize = 24.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("›", fontSize = 24.sp, color = MaterialTheme.colorScheme.primary)
         Spacer(Modifier.width(8.dp))
     }
 }
@@ -221,11 +290,17 @@ fun TrackRow(
     onFav: (Long) -> Unit,
 ) {
     Row(
-        Modifier.fillMaxWidth().clickable { onPlay(index) }
-            .padding(start = 12.dp, top = 4.dp, bottom = 4.dp, end = 4.dp),
+        Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 2.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .then(
+                if (selected) Modifier.background(MaterialTheme.colorScheme.primary.copy(alpha = 0.18f))
+                else Modifier
+            )
+            .clickable { onPlay(index) }
+            .padding(start = 8.dp, top = 4.dp, bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Cover(t, 96, Modifier.size(48.dp).clip(RoundedCornerShape(6.dp)))
+        Cover(t, 96, Modifier.size(48.dp).clip(RoundedCornerShape(10.dp)))
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(
@@ -253,6 +328,11 @@ fun TrackRow(
 // ---------------------------------------------------------------- панель плеєра
 
 @Composable
+private fun CtrlButton(icon: ImageVector, tint: Color, size: Dp = 30.dp, onClick: () -> Unit) {
+    IconButton(onClick = onClick) { Icon(icon, null, Modifier.size(size), tint = tint) }
+}
+
+@Composable
 fun PlayerPanel(
     player: Player,
     track: Track,
@@ -262,7 +342,10 @@ fun PlayerPanel(
     duration: Long,
     fav: Boolean,
     accent: Color,
-    tint: State<Color>,
+    g1: State<Color>,
+    g2: State<Color>,
+    strength: Float,
+    forward: Boolean,
     visible: Boolean,
     s: AppSettings,
     onFav: () -> Unit,
@@ -283,24 +366,30 @@ fun PlayerPanel(
     val shown = (dragging ?: position.toFloat()).coerceIn(0f, max)
     val inactive = MaterialTheme.colorScheme.onSurfaceVariant
     val pulse = rememberPulse(s.on(Fx.PULSE) && isPlaying && visible)
+    val glow = s.on(Fx.GLOW)
     val gradient = s.on(Fx.GRADIENT)
+    val panelAlpha = (strength + 0.2f).coerceAtMost(0.95f)
 
     val header: @Composable (Track) -> Unit = { t ->
         Row(verticalAlignment = Alignment.CenterVertically) {
             Cover(
                 t, 384,
-                Modifier.size(64.dp)
+                Modifier.size(72.dp)
                     .graphicsLayer {
                         scaleX = pulse.value
                         scaleY = pulse.value
                     }
-                    .clip(RoundedCornerShape(10.dp))
+                    .shadow(
+                        if (glow) 16.dp else 0.dp, RoundedCornerShape(14.dp),
+                        ambientColor = accent, spotColor = accent
+                    )
+                    .clip(RoundedCornerShape(14.dp))
             )
-            Spacer(Modifier.width(12.dp))
+            Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f)) {
                 Text(
                     t.title, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    style = MaterialTheme.typography.titleMedium
+                    style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold
                 )
                 Text(
                     t.artist, maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -311,21 +400,40 @@ fun PlayerPanel(
         }
     }
 
-    Surface(tonalElevation = 6.dp, modifier = Modifier.fillMaxWidth()) {
+    Surface(
+        tonalElevation = 6.dp,
+        shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
         Column(
             Modifier
                 .then(
                     if (gradient) Modifier.drawBehind {
                         drawRect(
-                            Brush.verticalGradient(listOf(tint.value.copy(alpha = 0.30f), Color.Transparent))
+                            Brush.horizontalGradient(
+                                listOf(
+                                    g1.value.copy(alpha = panelAlpha),
+                                    g2.value.copy(alpha = panelAlpha)
+                                )
+                            )
                         )
                     } else Modifier
                 )
                 .navigationBarsPadding()
-                .padding(horizontal = 16.dp, vertical = 8.dp)
+                .padding(horizontal = 16.dp, vertical = 10.dp)
         ) {
             if (s.on(Fx.FADE)) {
-                Crossfade(targetState = track, animationSpec = tween(350), label = "track") { header(it) }
+                AnimatedContent(
+                    targetState = track,
+                    transitionSpec = {
+                        val dir = if (forward) 1 else -1
+                        (slideInHorizontally(tween(420)) { dir * it / 2 } +
+                            fadeIn(tween(420)) +
+                            scaleIn(animationSpec = tween(420), initialScale = 0.88f)) togetherWith
+                            (slideOutHorizontally(tween(320)) { -dir * it / 2 } + fadeOut(tween(220)))
+                    },
+                    label = "track"
+                ) { header(it) }
             } else {
                 header(track)
             }
@@ -348,27 +456,30 @@ fun PlayerPanel(
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                IconButton(onClick = { player.shuffleModeEnabled = !shuffle }) {
-                    Text("🔀", fontSize = 22.sp, color = if (shuffle) accent else inactive)
+                CtrlButton(Ic.Shuffle, if (shuffle) accent else inactive, 26.dp) {
+                    player.shuffleModeEnabled = !shuffle
                 }
-                IconButton(onClick = { player.seekToPrevious() }) { Text("⏮", fontSize = 26.sp) }
-                IconButton(
-                    onClick = { if (player.isPlaying) player.pause() else player.play() },
-                    modifier = Modifier.size(56.dp)
-                ) { Text(if (isPlaying) "⏸" else "▶", fontSize = 34.sp) }
-                IconButton(onClick = { player.seekToNext() }) { Text("⏭", fontSize = 26.sp) }
-                IconButton(onClick = {
+                CtrlButton(Ic.Prev, MaterialTheme.colorScheme.onSurface, 34.dp) { player.seekToPrevious() }
+                Box(
+                    Modifier.size(62.dp).clip(CircleShape).background(accent)
+                        .clickable { if (player.isPlaying) player.pause() else player.play() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        if (isPlaying) Ic.Pause else Ic.Play, null,
+                        Modifier.size(36.dp), tint = onColor(accent)
+                    )
+                }
+                CtrlButton(Ic.Next, MaterialTheme.colorScheme.onSurface, 34.dp) { player.seekToNext() }
+                CtrlButton(
+                    if (repeat == Player.REPEAT_MODE_ONE) Ic.RepeatOne else Ic.Repeat,
+                    if (repeat == Player.REPEAT_MODE_OFF) inactive else accent, 26.dp
+                ) {
                     player.repeatMode = when (repeat) {
                         Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
                         Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
                         else -> Player.REPEAT_MODE_OFF
                     }
-                }) {
-                    Text(
-                        if (repeat == Player.REPEAT_MODE_ONE) "🔂" else "🔁",
-                        fontSize = 22.sp,
-                        color = if (repeat == Player.REPEAT_MODE_OFF) inactive else accent
-                    )
                 }
             }
         }
@@ -377,9 +488,57 @@ fun PlayerPanel(
 
 // ---------------------------------------------------------------- налаштування
 
+private val palette = listOf(
+    Color(0xFFE53935), Color(0xFFFF7043), Color(0xFFFFB300), Color(0xFFC0CA33),
+    Color(0xFF43A047), Color(0xFF00ACC1), Color(0xFF1E88E5), Color(0xFF3949AB),
+    Color(0xFF8E24AA), Color(0xFFEC407A), Color(0xFF26A69A), Color(0xFF546E7A),
+)
+
+private val presets = listOf(
+    Triple("Океан", Color(0xFF00C6FF), Color(0xFF0072FF)),
+    Triple("Захід", Color(0xFFFF9966), Color(0xFFFF5E62)),
+    Triple("Неон", Color(0xFFFF00CC), Color(0xFF3333FF)),
+    Triple("Ліс", Color(0xFF11998E), Color(0xFF38EF7D)),
+    Triple("Лава", Color(0xFFF12711), Color(0xFFF5AF19)),
+    Triple("Крига", Color(0xFF74EBD5), Color(0xFF9FACE6)),
+    Triple("Фіолет", Color(0xFF8E2DE2), Color(0xFF4A00E0)),
+)
+
 @Composable
-fun SettingsScreen(s: AppSettings, pad: PaddingValues, onBack: () -> Unit) {
-    Column(Modifier.padding(pad).fillMaxSize().verticalScroll(rememberScrollState())) {
+private fun SectionTitle(text: String) {
+    Text(
+        text, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 20.dp, bottom = 4.dp)
+    )
+}
+
+@Composable
+private fun SwatchRow(title: String, selected: Int, onPick: (Int) -> Unit) {
+    Text(
+        title, style = MaterialTheme.typography.labelLarge,
+        modifier = Modifier.padding(start = 16.dp, top = 8.dp)
+    )
+    Row(
+        Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        for (c in palette) {
+            val argb = c.toArgb()
+            Box(
+                Modifier.size(38.dp).clip(CircleShape).background(c)
+                    .then(
+                        if (argb == selected) Modifier.border(3.dp, MaterialTheme.colorScheme.onSurface, CircleShape)
+                        else Modifier
+                    )
+                    .clickable { onPick(argb) }
+            )
+        }
+    }
+}
+
+@Composable
+fun SettingsScreen(s: AppSettings, onBack: () -> Unit) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
         Row(
             Modifier.fillMaxWidth().clickable(onClick = onBack).padding(horizontal = 16.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically
@@ -395,14 +554,77 @@ fun SettingsScreen(s: AppSettings, pad: PaddingValues, onBack: () -> Unit) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
         )
+
+        SectionTitle("Кольори")
         FxRow(s, Fx.DYNAMIC, "Кольори з шпалер", "Тема підлаштовується під шпалери телефона (Android 12+)",
             enabled = Build.VERSION.SDK_INT >= 31)
-        FxRow(s, Fx.COVER, "Колір з обкладинки", "Акцентний колір береться з обкладинки поточного треку")
-        FxRow(s, Fx.GRADIENT, "Градієнтний фон", "М'яке кольорове підсвічування екрана та панелі плеєра")
+        FxRow(s, Fx.COVER, "Колір з обкладинки", "Увесь інтерфейс (кнопки, виділення, повзунок) бере колір з обкладинки треку")
+
+        SectionTitle("Градієнт")
+        FxRow(s, Fx.GRADIENT, "Градієнтний фон", "Кольоровий фон екрана та панелі плеєра")
+        FxRow(s, Fx.ANIMGRAD, "Живий градієнт", "Фон повільно «пливе», поки грає музика")
+        Row(
+            Modifier.fillMaxWidth().clickable { s.setCustom(!s.gradCustom) }
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("Власні кольори градієнта", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    if (s.gradCustom) "Градієнт з двох вибраних кольорів"
+                    else "Зараз авто: колір береться з обкладинки",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Switch(checked = s.gradCustom, onCheckedChange = { s.setCustom(it) })
+        }
+        if (s.gradCustom) {
+            Text(
+                "Готові теми", style = MaterialTheme.typography.labelLarge,
+                modifier = Modifier.padding(start = 16.dp, top = 4.dp)
+            )
+            Row(
+                Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                for ((name, a, b) in presets) {
+                    Box(
+                        Modifier.clip(RoundedCornerShape(14.dp))
+                            .background(Brush.horizontalGradient(listOf(a, b)))
+                            .clickable { s.setColors(a.toArgb(), b.toArgb()) }
+                            .padding(horizontal = 18.dp, vertical = 12.dp)
+                    ) { Text(name, color = Color.White, fontWeight = FontWeight.Bold) }
+                }
+            }
+            SwatchRow("Колір зверху", s.grad1) { s.setColors(it, s.grad2) }
+            SwatchRow("Колір знизу", s.grad2) { s.setColors(s.grad1, it) }
+            Box(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp).height(52.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(Brush.horizontalGradient(listOf(Color(s.grad1), Color(s.grad2))))
+            )
+        }
+        Text(
+            "Яскравість градієнта", style = MaterialTheme.typography.labelLarge,
+            modifier = Modifier.padding(start = 16.dp, top = 8.dp)
+        )
+        Slider(
+            value = s.gradStrength,
+            onValueChange = { s.setStrength(it, persist = false) },
+            onValueChangeFinished = { s.setStrength(s.gradStrength, persist = true) },
+            valueRange = 0.15f..0.9f,
+            modifier = Modifier.padding(horizontal = 16.dp)
+        )
+
+        SectionTitle("Анімації")
         FxRow(s, Fx.EQ, "Еквалайзер", "Анімовані смужки біля треку, що грає")
-        FxRow(s, Fx.PULSE, "Пульсація обкладинки", "Обкладинка в плеєрі ледь пульсує, поки грає музика")
+        FxRow(s, Fx.PULSE, "Пульсація обкладинки", "Обкладинка в плеєрі «дихає», поки грає музика")
+        FxRow(s, Fx.GLOW, "Сяйво обкладинки", "Кольорове світіння навколо обкладинки в плеєрі")
         FxRow(s, Fx.LISTANIM, "Анімації списку", "Плавне переміщення рядків і відскок серця")
-        FxRow(s, Fx.FADE, "Плавні переходи", "Згасання між треками та плавна зміна кольорів")
+        FxRow(s, Fx.FADE, "Плавні переходи", "Слайд між треками, папками та екранами, плавна зміна кольорів")
+        Spacer(Modifier.height(28.dp))
     }
 }
 

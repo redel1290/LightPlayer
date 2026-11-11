@@ -14,19 +14,39 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -36,6 +56,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -45,6 +66,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -52,6 +74,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -61,6 +84,7 @@ import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.ListenableFuture
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
@@ -110,6 +134,12 @@ private fun audioPermission() =
 class FolderItem(val name: String, val path: String, val count: Int)
 class ListView(val folders: List<FolderItem>, val playable: List<Track>)
 
+/** Який екран зараз показується (для анімації переходів). */
+data class Screen(val settings: Boolean, val path: String) {
+    val depth: Int
+        get() = if (settings) 1000 else if (path.isEmpty()) 0 else path.count { it == '/' } + 1
+}
+
 /**
  * Вміст екрана: спершу папки (за алфавітом), потім обрані треки, потім решта.
  * При пошуку показуються збіги з усієї бібліотеки (без папок).
@@ -137,9 +167,11 @@ fun buildView(tracks: List<Track>, path: String, query: String, favs: Set<Long>)
     return ListView(folders, direct.sortedByDescending { it.id in favs })
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun App(player: Player?, s: AppSettings, favs: Favs) {
     val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
 
     fun hasAudio() =
         ContextCompat.checkSelfPermission(ctx, audioPermission()) == PackageManager.PERMISSION_GRANTED
@@ -162,10 +194,29 @@ fun App(player: Player?, s: AppSettings, favs: Favs) {
 
     var tracks by remember { mutableStateOf<List<Track>>(emptyList()) }
     var loaded by remember { mutableStateOf(false) }
-    LaunchedEffect(granted) {
-        if (granted) {
-            tracks = withContext(Dispatchers.IO) { Library.load(ctx) }
-            loaded = true
+    var refreshing by remember { mutableStateOf(false) }
+
+    suspend fun reload() {
+        val list = withContext(Dispatchers.IO) { Library.load(ctx) }
+        if (list != tracks) tracks = list
+        loaded = true
+    }
+
+    val visible = rememberVisible()
+    // Бібліотека перечитується при кожному поверненні в додаток (і при першому запуску)
+    LaunchedEffect(granted, visible) {
+        if (granted && visible) reload()
+    }
+
+    val onRefresh: () -> Unit = {
+        scope.launch {
+            refreshing = true
+            try {
+                Library.rescan(ctx)
+                reload()
+            } finally {
+                refreshing = false
+            }
         }
     }
 
@@ -173,9 +224,7 @@ fun App(player: Player?, s: AppSettings, favs: Favs) {
     var path by rememberSaveable { mutableStateOf("") }
     var showSettings by rememberSaveable { mutableStateOf(false) }
     val searching = query.isNotBlank()
-
     val favIds = favs.ids
-    val view = remember(tracks, path, query, favIds) { buildView(tracks, path, query, favIds) }
 
     BackHandler(enabled = showSettings || searching || path.isNotEmpty()) {
         when {
@@ -191,15 +240,22 @@ fun App(player: Player?, s: AppSettings, favs: Favs) {
     var shuffle by remember { mutableStateOf(false) }
     var repeat by remember { mutableIntStateOf(Player.REPEAT_MODE_OFF) }
     var duration by remember { mutableLongStateOf(0L) }
+    var forward by remember { mutableStateOf(true) }
 
     DisposableEffect(player) {
         if (player == null) return@DisposableEffect onDispose { }
+        var lastIdx = -1
         fun sync() {
             isPlaying = player.isPlaying
             currentId = player.currentMediaItem?.mediaId
             shuffle = player.shuffleModeEnabled
             repeat = player.repeatMode
             duration = player.duration.coerceAtLeast(0L)
+            val ni = player.currentMediaItemIndex
+            if (ni != lastIdx) {
+                forward = ni >= lastIdx
+                lastIdx = ni
+            }
         }
         sync()
         val l = object : Player.Listener {
@@ -209,7 +265,6 @@ fun App(player: Player?, s: AppSettings, favs: Favs) {
         onDispose { player.removeListener(l) }
     }
 
-    val visible = rememberVisible()
     val current = remember(currentId, tracks) { tracks.firstOrNull { it.id.toString() == currentId } }
 
     // Відновлення з queue.txt: беремо номер треку, шукаємо його в бібліотеці й ставимо на паузі.
@@ -229,118 +284,202 @@ fun App(player: Player?, s: AppSettings, favs: Favs) {
         player.prepare()
     }
 
-    val playAt = remember(view, player) {
-        { index: Int ->
-            player?.run {
-                setMediaItems(view.playable.map { it.toItem() }, index, 0L)
-                prepare()
-                play()
-            }
-            Unit
-        }
-    }
     val onFav = remember(favs) { { id: Long -> favs.toggle(id) } }
 
     // --- кольори ---
+    val outer = MaterialTheme.colorScheme
+    val gradOn = s.on(Fx.GRADIENT)
+    val custom = gradOn && s.gradCustom
     val coverOn = s.on(Fx.COVER)
     val coverAccent by produceState<Color?>(null, current?.id, coverOn) {
         value = if (current == null || !coverOn) null
         else withContext(Art.dispatcher) { Art.accent(ctx, current) }?.let { Color(it) }
     }
-    val accent = coverAccent ?: MaterialTheme.colorScheme.primary
-    val tint = animateColorAsState(accent, tween(if (s.on(Fx.FADE)) 600 else 0), label = "tint")
+    // Колір, яким фарбується весь інтерфейс: власний градієнт > обкладинка > колір теми
+    val override: Color? = if (custom) Color(s.grad1) else coverAccent
+    val accent = override ?: outer.primary
+    val themed = remember(outer, override) {
+        if (override == null) outer else {
+            val container = override.copy(alpha = 0.38f).compositeOver(outer.surface)
+            outer.copy(
+                primary = override,
+                onPrimary = onColor(override),
+                primaryContainer = container,
+                onPrimaryContainer = outer.onSurface,
+                secondaryContainer = hueShift(override, 40f).copy(alpha = 0.30f).compositeOver(outer.surface),
+            )
+        }
+    }
+    val c1 = if (custom) Color(s.grad1) else accent
+    val c2 = if (custom) Color(s.grad2) else remember(accent) { hueShift(accent, 55f) }
+    val fadeOn = s.on(Fx.FADE)
+    val g1 = animateColorAsState(c1, tween(if (fadeOn) 800 else 0), label = "g1")
+    val g2 = animateColorAsState(c2, tween(if (fadeOn) 800 else 0), label = "g2")
+    val strength = s.gradStrength
+    val drift = rememberDrift(gradOn && s.on(Fx.ANIMGRAD) && isPlaying && visible)
 
     val eqOn = s.on(Fx.EQ)
     val animOn = s.on(Fx.LISTANIM)
 
-    Box(
-        Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-            .then(
-                if (s.on(Fx.GRADIENT)) Modifier.drawBehind {
-                    drawRect(
-                        Brush.verticalGradient(
-                            listOf(tint.value.copy(alpha = 0.22f), Color.Transparent),
-                            endY = size.height * 0.55f
+    MaterialTheme(colorScheme = themed) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(themed.background)
+                .then(
+                    if (gradOn) Modifier.drawBehind {
+                        val h = size.height
+                        val off = (drift.value - 0.5f) * h * 0.6f
+                        drawRect(
+                            Brush.verticalGradient(
+                                listOf(
+                                    g1.value.copy(alpha = strength),
+                                    g2.value.copy(alpha = strength)
+                                ),
+                                startY = -h * 0.2f + off,
+                                endY = h * 1.2f + off
+                            )
                         )
-                    )
-                } else Modifier
-            )
-    ) {
-        Scaffold(
-            containerColor = Color.Transparent,
-            bottomBar = {
-                if (player != null && current != null) {
-                    PlayerPanel(
-                        player, current, isPlaying, shuffle, repeat, duration,
-                        current.id in favIds, accent, tint, visible, s,
-                        onFav = { favs.toggle(current.id) }
-                    )
+                    } else Modifier
+                )
+        ) {
+            Scaffold(
+                containerColor = Color.Transparent,
+                bottomBar = {
+                    if (player != null && current != null) {
+                        AnimatedVisibility(
+                            visible = !showSettings,
+                            enter = if (fadeOn) slideInVertically { it } + fadeIn() else EnterTransition.None,
+                            exit = if (fadeOn) slideOutVertically { it } + fadeOut() else ExitTransition.None
+                        ) {
+                            PlayerPanel(
+                                player, current, isPlaying, shuffle, repeat, duration,
+                                current.id in favIds, accent, g1, g2, strength, forward, visible, s,
+                                onFav = { favs.toggle(current.id) }
+                            )
+                        }
+                    }
                 }
-            }
-        ) { pad ->
-            if (showSettings) {
-                SettingsScreen(s, pad) { showSettings = false }
-            } else {
+            ) { pad ->
+                val body: @Composable (Screen) -> Unit = { sc ->
+                    if (sc.settings) {
+                        SettingsScreen(s) { showSettings = false }
+                    } else {
+                        val view = remember(tracks, sc.path, query, favIds) {
+                            buildView(tracks, sc.path, query, favIds)
+                        }
+                        val playAt = remember(view, player) {
+                            { index: Int ->
+                                player?.run {
+                                    setMediaItems(view.playable.map { it.toItem() }, index, 0L)
+                                    prepare()
+                                    play()
+                                }
+                                Unit
+                            }
+                        }
+                        Column(Modifier.fillMaxSize()) {
+                            if (!searching && sc.path.isNotEmpty()) {
+                                FolderHeader(sc.path) { path = sc.path.substringBeforeLast('/', "") }
+                            }
+                            // Потягни вниз від верху списку: пересканувати Music і оновити список
+                            PullToRefreshBox(
+                                isRefreshing = refreshing,
+                                onRefresh = onRefresh,
+                                modifier = Modifier.fillMaxSize()
+                            ) {
+                                when {
+                                    !granted -> Box(
+                                        Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Button(onClick = { launcher.launch(perms) }) {
+                                            Text("Надати доступ до музики")
+                                        }
+                                    }
+                                    loaded && tracks.isEmpty() -> Box(
+                                        Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+                                        contentAlignment = Alignment.Center
+                                    ) { Text("У /Music нічого не знайдено\nПотягни вниз, щоб оновити") }
+                                    else -> LazyColumn(Modifier.fillMaxSize()) {
+                                        items(view.folders, key = { "f:" + it.path }) { f ->
+                                            Box(if (animOn) Modifier.animateItem() else Modifier) {
+                                                FolderRow(f.name, f.count) { path = f.path }
+                                            }
+                                        }
+                                        itemsIndexed(view.playable, key = { _, t -> t.id }) { index, t ->
+                                            val selected = t.id.toString() == currentId
+                                            Box(if (animOn) Modifier.animateItem() else Modifier) {
+                                                TrackRow(
+                                                    t, index, selected,
+                                                    playing = selected && isPlaying && visible,
+                                                    fav = t.id in favIds,
+                                                    eq = eqOn,
+                                                    bounce = animOn,
+                                                    onPlay = playAt,
+                                                    onFav = onFav,
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 Column(Modifier.padding(pad).fillMaxSize()) {
-                    Row(
-                        Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                    AnimatedVisibility(
+                        visible = !showSettings,
+                        enter = if (fadeOn) expandVertically() + fadeIn() else EnterTransition.None,
+                        exit = if (fadeOn) shrinkVertically() + fadeOut() else ExitTransition.None
                     ) {
-                        OutlinedTextField(
-                            value = query,
-                            onValueChange = { query = it },
-                            modifier = Modifier.weight(1f),
-                            singleLine = true,
-                            placeholder = { Text("Пошук") }
-                        )
-                        IconButton(onClick = { showSettings = true }) { Text("⚙", fontSize = 24.sp) }
-                        IconButton(onClick = {
-                            // Дозволяє грати у фоні без агресивного вбивства від батареї
-                            runCatching {
-                                ctx.startActivity(
-                                    Intent(
-                                        SysSettings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                                        Uri.parse("package:${ctx.packageName}")
-                                    )
-                                )
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedTextField(
+                                value = query,
+                                onValueChange = { query = it },
+                                modifier = Modifier.weight(1f),
+                                singleLine = true,
+                                placeholder = { Text("Пошук") }
+                            )
+                            IconButton(onClick = { showSettings = true }) {
+                                Icon(Icons.Filled.Settings, "Налаштування", tint = MaterialTheme.colorScheme.primary)
                             }
-                        }) { Text("🔋", fontSize = 22.sp) }
-                    }
-
-                    if (!searching && path.isNotEmpty()) {
-                        FolderHeader(path) { path = path.substringBeforeLast('/', "") }
-                    }
-
-                    when {
-                        !granted -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Button(onClick = { launcher.launch(perms) }) { Text("Надати доступ до музики") }
-                        }
-                        loaded && tracks.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Text("У /Music нічого не знайдено")
-                        }
-                        else -> LazyColumn(Modifier.fillMaxSize()) {
-                            items(view.folders, key = { "f:" + it.path }) { f ->
-                                Box(if (animOn) Modifier.animateItem() else Modifier) {
-                                    FolderRow(f.name, f.count) { path = f.path }
-                                }
-                            }
-                            itemsIndexed(view.playable, key = { _, t -> t.id }) { index, t ->
-                                val selected = t.id.toString() == currentId
-                                Box(if (animOn) Modifier.animateItem() else Modifier) {
-                                    TrackRow(
-                                        t, index, selected,
-                                        playing = selected && isPlaying && visible,
-                                        fav = t.id in favIds,
-                                        eq = eqOn,
-                                        bounce = animOn,
-                                        onPlay = playAt,
-                                        onFav = onFav,
+                            IconButton(onClick = {
+                                // Дозволяє грати у фоні без агресивного вбивства від батареї
+                                runCatching {
+                                    ctx.startActivity(
+                                        Intent(
+                                            SysSettings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                            Uri.parse("package:${ctx.packageName}")
+                                        )
                                     )
                                 }
-                            }
+                            }) { Text("🔋", fontSize = 22.sp) }
                         }
+                    }
+
+                    val screen = Screen(showSettings, path)
+                    if (fadeOn) {
+                        AnimatedContent(
+                            targetState = screen,
+                            modifier = Modifier.weight(1f).fillMaxWidth(),
+                            transitionSpec = {
+                                if (targetState.depth > initialState.depth) {
+                                    (slideInHorizontally(tween(340)) { it / 3 } + fadeIn(tween(340))) togetherWith
+                                        (slideOutHorizontally(tween(340)) { -it / 3 } + fadeOut(tween(200)))
+                                } else {
+                                    (slideInHorizontally(tween(340)) { -it / 3 } + fadeIn(tween(340))) togetherWith
+                                        (slideOutHorizontally(tween(340)) { it / 3 } + fadeOut(tween(200)))
+                                }
+                            },
+                            label = "nav"
+                        ) { sc -> body(sc) }
+                    } else {
+                        Box(Modifier.weight(1f).fillMaxWidth()) { body(screen) }
                     }
                 }
             }

@@ -4,14 +4,23 @@ import android.content.ContentUris
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color as AColor
+import android.media.MediaScannerConnection
 import android.net.Uri
+import android.os.Environment
 import android.provider.MediaStore
 import android.util.LruCache
 import android.util.Size
 import androidx.compose.runtime.Immutable
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
+import kotlin.coroutines.resume
 import java.util.concurrent.Executors
 
 @Immutable
@@ -39,6 +48,42 @@ data class Track(
 }
 
 object Library {
+    /**
+     * Просить систему пересканувати папку Music і всі її підпапки, щоб нові/видалені
+     * файли та папки потрапили в медіабібліотеку. Чекає не довше 4 с.
+     */
+    @Suppress("DEPRECATION")
+    suspend fun rescan(ctx: Context) {
+        withContext(Dispatchers.IO) {
+            try {
+                val root = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
+                val paths = ArrayList<String>()
+                fun walk(d: File, depth: Int) {
+                    paths += d.absolutePath
+                    if (depth >= 8) return
+                    d.listFiles()?.forEach {
+                        if (it.isDirectory && !it.name.startsWith(".")) walk(it, depth + 1)
+                    }
+                }
+                if (root.isDirectory) walk(root, 0)
+                if (paths.isNotEmpty()) {
+                    withTimeoutOrNull(4_000) {
+                        suspendCancellableCoroutine<Unit> { cont ->
+                            val left = AtomicInteger(paths.size)
+                            MediaScannerConnection.scanFile(
+                                ctx.applicationContext, paths.toTypedArray(), null
+                            ) { _, _ ->
+                                if (left.decrementAndGet() == 0 && cont.isActive) cont.resume(Unit)
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                // скан не обов'язковий: далі все одно перечитується медіабібліотека
+            }
+        }
+    }
+
     /** Усі треки з /storage/emulated/0/Music/ разом з підпапками (приховані папки з крапкою пропускаються). */
     fun load(ctx: Context): List<Track> {
         val out = ArrayList<Track>()
