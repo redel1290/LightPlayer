@@ -12,15 +12,29 @@ android {
         applicationId = "com.example.lightplayer"
         minSdk = 29
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 5
+        versionName = "1.4"
+    }
+
+    // Постійний ключ підпису береться зі змінних середовища (GitHub Secrets).
+    // Без них збірка підписується тимчасовим debug-ключем.
+    val ksFile = System.getenv("KEYSTORE_FILE")
+    signingConfigs {
+        if (ksFile != null) {
+            create("release") {
+                storeFile = file(ksFile)
+                storePassword = System.getenv("KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("KEY_ALIAS")
+                keyPassword = System.getenv("KEYSTORE_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName(if (ksFile != null) "release" else "debug")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
         }
     }

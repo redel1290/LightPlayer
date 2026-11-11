@@ -6,9 +6,12 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.util.Size
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.Player
 import androidx.media3.common.util.BitmapLoader
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultLoadControl
@@ -32,6 +35,58 @@ class PlaybackService : MediaSessionService() {
 
     private var session: MediaSession? = null
     private var executor: ListeningExecutorService? = null
+    private var exo: ExoPlayer? = null
+    private val handler = Handler(Looper.getMainLooper())
+
+    /**
+     * Пише стан у queue.txt (див. QueueStore): номер треку, що грає, позицію і чергу.
+     * full = true переписує всю чергу, інакше оновлюється лише перший рядок.
+     */
+    private fun saveState(full: Boolean = false) {
+        val p = exo ?: return
+        val n = p.mediaItemCount
+        if (n == 0) return
+        val cur = p.currentMediaItemIndex + 1
+        try {
+            if (full || !QueueStore.exists(this)) {
+                val items = List(n) { p.getMediaItemAt(it) }
+                QueueStore.writeAll(this, items, cur, p.currentPosition, p.shuffleModeEnabled, p.repeatMode)
+            } else {
+                QueueStore.writeHeader(this, cur, p.currentPosition, p.shuffleModeEnabled, p.repeatMode)
+            }
+        } catch (e: Exception) {
+            // запис стану не має ламати відтворення
+        }
+    }
+
+    // Страховка на випадок, якщо систему вб'є процес: пишемо позицію кожні 15 с під час гри
+    private val ticker = object : Runnable {
+        override fun run() {
+            saveState()
+            handler.postDelayed(this, 15_000)
+        }
+    }
+
+    private val stateListener = object : Player.Listener {
+        override fun onEvents(player: Player, events: Player.Events) {
+            if (events.contains(Player.EVENT_TIMELINE_CHANGED)) {
+                saveState(full = true)
+            } else if (events.containsAny(
+                    Player.EVENT_MEDIA_ITEM_TRANSITION,
+                    Player.EVENT_IS_PLAYING_CHANGED,
+                    Player.EVENT_POSITION_DISCONTINUITY,
+                    Player.EVENT_SHUFFLE_MODE_ENABLED_CHANGED,
+                    Player.EVENT_REPEAT_MODE_CHANGED,
+                )
+            ) {
+                saveState()
+            }
+            if (events.contains(Player.EVENT_IS_PLAYING_CHANGED)) {
+                handler.removeCallbacks(ticker)
+                if (player.isPlaying) handler.postDelayed(ticker, 15_000)
+            }
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -58,6 +113,8 @@ class PlaybackService : MediaSessionService() {
             .setHandleAudioBecomingNoisy(true) // пауза при відключенні навушників
             .setWakeMode(C.WAKE_MODE_LOCAL)
             .build()
+        exo = player
+        player.addListener(stateListener)
 
         val ex = MoreExecutors.listeningDecorator(Executors.newSingleThreadExecutor())
         executor = ex
@@ -75,10 +132,16 @@ class PlaybackService : MediaSessionService() {
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = session
 
-    // onTaskRemoved не перевизначаємо: Media3 сам зупиняє сервіс,
-    // якщо музика НЕ грає, і лишає його, якщо грає.
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        saveState()
+        super.onTaskRemoved(rootIntent) // Media3 сам зупиняє сервіс, якщо музика не грає
+    }
 
     override fun onDestroy() {
+        handler.removeCallbacks(ticker)
+        saveState()
+        exo?.removeListener(stateListener)
+        exo = null
         session?.run {
             player.release()
             release()
